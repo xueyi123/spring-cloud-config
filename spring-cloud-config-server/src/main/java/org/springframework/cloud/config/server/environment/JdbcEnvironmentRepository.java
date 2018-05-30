@@ -15,16 +15,14 @@
  */
 package org.springframework.cloud.config.server.environment;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 
 import org.springframework.cloud.config.environment.Environment;
 import org.springframework.cloud.config.environment.PropertySource;
@@ -33,6 +31,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.util.StringUtils;
+import org.yaml.snakeyaml.Yaml;
 
 /**
  * An {@link EnvironmentRepository} that picks up data from a relational database. The
@@ -90,12 +89,46 @@ public class JdbcEnvironmentRepository implements EnvironmentRepository, Ordered
 		List<String> envs = new ArrayList<String>(new LinkedHashSet<>(Arrays.asList(profiles)));
 		Collections.reverse(applications);
 		Collections.reverse(envs);
+		//源版代码
+//		for (String app : applications) {
+//			for (String env : envs) {
+//				Map<String, String> next = (Map<String, String>) jdbc.query(this.sql,
+//						new Object[] { app, env, label }, this.extractor);
+//				if (!next.isEmpty()) {
+//					environment.add(new PropertySource(app + "-" + env, next));
+//				}
+//			}
+//		}
+		//修改代码 同时支持yml ，properties,kv多种配置
 		for (String app : applications) {
 			for (String env : envs) {
 				Map<String, String> next = (Map<String, String>) jdbc.query(this.sql,
 						new Object[] { app, env, label }, this.extractor);
 				if (!next.isEmpty()) {
-					environment.add(new PropertySource(app + "-" + env, next));
+					next.entrySet().forEach(e->{
+						String k = e.getKey();
+						String v = e.getValue();
+						if (k.endsWith(".yml")){
+							try {
+								Map<Object,Object> map = ymlToProperties(v);
+								environment.add(new PropertySource(app + "-" + env, map));
+							} catch (InterruptedException e1) {
+								e1.printStackTrace();
+							}
+						}else if (k.endsWith(".properties")){
+							try {
+								InputStream in = new ByteArrayInputStream(v.getBytes());
+								Properties prop = new Properties();
+								prop.load(in);
+								Map<Object,Object> pm = new HashMap<>((Map) prop);
+								environment.add(new PropertySource(app + "-" + env, pm));
+							} catch (IOException ioe) {
+								ioe.printStackTrace();
+							}
+						}else {
+							environment.add(new PropertySource(app + "-" + env, next));
+						}
+					});
 				}
 			}
 		}
@@ -111,7 +144,63 @@ public class JdbcEnvironmentRepository implements EnvironmentRepository, Ordered
 		this.order = order;
 	}
 
+
+	public Map<Object,Object> ymlToProperties(String v) throws InterruptedException {
+		Map<Object, Object> ym = new Yaml().loadAs(v, Map.class);
+		BlockingQueue<MM> queue = new ArrayBlockingQueue(10);
+		queue.put(new MM(null,ym));
+		Map<Object,Object> rs = new HashMap<>();
+		while (!queue.isEmpty()){
+			MM mm = queue.poll();
+			mm.map.entrySet().forEach(e->{
+				if (e.getValue() instanceof Map){
+					try {
+						String k ="";
+						if (mm.key!=null){
+							k = mm.key+"."+e.getKey().toString();
+						}else {
+							k = e.getKey().toString();
+						}
+						queue.put(new MM(k,(Map<Object, Object>)e.getValue()));
+					} catch (InterruptedException e1) {
+						e1.printStackTrace();
+					}
+				}else {
+					String k ="";
+					if (mm.key!=null){
+						k=mm.key+"."+e.getKey().toString();
+					}else {
+						k= e.getKey().toString();
+					}
+					rs.put(k,e.getValue().toString());
+				}
+			});
+		}
+		return rs;
+	}
+
 }
+class MM{
+	String key;
+	Map<Object,Object> map;
+	public MM(String key,Map<Object,Object> map){
+		this.key=key;
+		this.map=map;
+	}
+	public String getKey() {
+		return key;
+	}
+	public void setKey(String key) {
+		this.key = key;
+	}
+	public Map<Object, Object> getMap() {
+		return map;
+	}
+	public void setMap(Map<Object, Object> map) {
+		this.map = map;
+	}
+}
+
 
 class PropertiesResultSetExtractor implements ResultSetExtractor<Map<String, String>> {
 
